@@ -17,7 +17,7 @@ const COL_LABELS = { bad: '😞 Bad', sad: '😢 Sad', glad: '😊 Glad', action
 /* ─────────────────────────────────────────────────────
    STATE
 ───────────────────────────────────────────────────── */
-let ydoc, provider, yCards, yMeta;
+let ydoc, provider, wsProvider, yCards, yMeta;
 let currentRoom = null;
 let isFacilitator = false;
 let currentCol = null;       // which column the add-modal targets
@@ -201,31 +201,55 @@ function initYjs(roomId) {
 
   renderAllColumns();
 
-  // WebRTC provider — connects peers in the same room.
-  // Wrapped in try/catch so a transport failure doesn't break the local UI.
+  // ── Transport #1: WebSocket (RELIABLE) ────────────────────────────────
+  // demos.yjs.dev is the official public Yjs websocket broker. Acts as a
+  // central server so peers don't need WebRTC signaling or NAT traversal.
+  // This is what actually makes "share a link → join the same room" work
+  // reliably, especially when the y-webrtc signaling server is down (as
+  // signaling.yjs.dev frequently is in 2026).
+  try {
+    if (typeof WebsocketProvider === 'undefined') {
+      throw new Error('WebsocketProvider is not defined (y-websocket failed to load)');
+    }
+    // IMPORTANT: room names on the public demo server are GLOBAL. Our
+    // 3-word + 4-digit IDs are unique enough for retros, but we also
+    // namespace them so we don't collide with other Yjs demos.
+    const wsRoomName = 'retro-board::' + roomId;
+    wsProvider = new WebsocketProvider('wss://demos.yjs.dev/ws', wsRoomName, ydoc);
+    wsProvider.on('status', e => {
+      console.log('[RetroBoard] websocket status:', e.status);
+    });
+    wsProvider.awareness.on('change', updatePeerCount);
+    wsProvider.awareness.setLocalState({ online: true });
+  } catch (err) {
+    console.error('[RetroBoard] WebSocket init failed:', err);
+    toast('⚠ Sync server unreachable: ' + err.message, 6000);
+  }
+
+  // ── Transport #2: WebRTC (FAST P2P, best-effort) ──────────────────────
+  // Direct peer-to-peer for lower latency when signaling+NAT allow it.
+  // Failure here is fine — the websocket above already syncs everyone.
   try {
     if (typeof WebrtcProvider === 'undefined') {
       throw new Error('WebrtcProvider is not defined (y-webrtc failed to load)');
     }
     provider = new WebrtcProvider(roomId, ydoc, {
-      // Note: y-webrtc-signaling-eu.herokuapp.com was shut down with Heroku's
-      // free tier in 2022, so we only use the official signaling server.
       signaling: ['wss://signaling.yjs.dev'],
       maxConns: 20,
       filterBcConns: false,
     });
-    provider.awareness.on('change', updatePeerCount);
-    provider.awareness.setLocalState({ online: true });
   } catch (err) {
-    console.error('[RetroBoard] WebRTC init failed:', err);
-    toast('⚠ Real-time sync unavailable: ' + err.message + ' (cards still work locally)', 6000);
+    console.warn('[RetroBoard] WebRTC unavailable (websocket fallback in use):', err);
   }
 }
 
 function updatePeerCount() {
-  if (!provider) { $('peer-count-num').textContent = '1'; return; }
-  const states = provider.awareness.getStates();
-  $('peer-count-num').textContent = states.size;
+  // Prefer the websocket awareness (reliable, sees every peer in the room).
+  // Fall back to the webrtc awareness if websocket failed.
+  const aw = (wsProvider && wsProvider.awareness)
+          || (provider && provider.awareness);
+  if (!aw) { $('peer-count-num').textContent = '1'; return; }
+  $('peer-count-num').textContent = aw.getStates().size;
 }
 
 /* ═══════════════════════════════════════════════════════

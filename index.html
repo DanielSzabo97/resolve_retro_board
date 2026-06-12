@@ -14,8 +14,10 @@
     try {
       const Y = await import('https://esm.sh/yjs@13.6.15');
       const { WebrtcProvider } = await import('https://esm.sh/y-webrtc@10.3.0?bundle-deps');
+      const { WebsocketProvider } = await import('https://esm.sh/y-websocket@2.0.4?bundle-deps');
       window.Y = Y;
       window.WebrtcProvider = WebrtcProvider;
+      window.WebsocketProvider = WebsocketProvider;
       await import('./app.js');
     } catch (err) {
       console.error('[RetroBoard] Library load failed:', err);
