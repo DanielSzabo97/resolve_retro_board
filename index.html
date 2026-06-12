@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Retro Board</title>
+  <link rel="stylesheet" href="style.css" />
+  <!--
+    Yjs + y-webrtc do NOT ship UMD bundles on npm/jsdelivr, so we load them
+    as ES modules from esm.sh (which serves a single bundled file with all
+    deps included) and expose them as globals for app.js to use.
+  -->
+  <script type="module">
+    import * as Y from 'https://esm.sh/yjs@13.6.15';
+    import { WebrtcProvider } from 'https://esm.sh/y-webrtc@10.3.0?bundle-deps';
+    window.Y = Y;
+    window.WebrtcProvider = WebrtcProvider;
+    // Load app.js only after Yjs globals are ready
+    await import('./app.js');
+  </script>
+</head>
+<body class="light">
+
+  <!-- ═══════════════════════════════════ LOBBY ═══════════════════════════════════ -->
+  <div id="lobby">
+    <div class="lobby-card">
+      <div class="lobby-logo">🔁</div>
+      <h1>Retro Board</h1>
+      <p class="lobby-sub">Bad · Sad · Glad · Action Items</p>
+
+      <div class="lobby-section">
+        <button id="btn-new-room" class="btn btn-primary btn-lg">✨ Create New Room</button>
+      </div>
+
+      <div class="lobby-divider"><span>or join existing</span></div>
+
+      <div class="lobby-section">
+        <input id="join-room-input" type="text" placeholder="Paste room link or room ID…" />
+        <button id="btn-join-room" class="btn btn-secondary">Join Room</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════════ APP ══════════════════════════════════════ -->
+  <div id="app" class="hidden">
+
+    <!-- HEADER -->
+    <header id="main-header">
+      <div class="header-left">
+        <span class="app-logo">🔁</span>
+        <span class="app-title">Retro Board</span>
+        <span id="room-badge" class="room-badge" title="Click to copy link">
+          <span id="room-id-label"></span>
+          <span class="copy-icon">📋</span>
+        </span>
+      </div>
+
+      <div class="header-center">
+        <div id="peer-count" class="peer-count" title="Connected peers">
+          <span class="peer-dot"></span>
+          <span id="peer-count-num">1</span> connected
+        </div>
+      </div>
+
+      <div class="header-right">
+        <button id="btn-toggle-theme" class="btn btn-icon" title="Toggle theme">🌙</button>
+        <button id="btn-facilitator" class="btn btn-outline" title="Become facilitator">🎭 Facilitator</button>
+        <button id="btn-export" class="btn btn-primary" title="Export Action Items">📤 Export</button>
+      </div>
+    </header>
+
+    <!-- FACILITATOR BAR -->
+    <div id="facilitator-bar" class="hidden">
+      <span class="fac-label">🎭 You are the Facilitator</span>
+      <div class="fac-actions">
+        <button id="btn-hide-all" class="btn btn-sm btn-warning">👁 Hide All Cards</button>
+        <button id="btn-reveal-all" class="btn btn-sm btn-success">👁 Reveal All Cards</button>
+        <button id="btn-reveal-votes" class="btn btn-sm btn-info">🗳 Toggle Vote Counts</button>
+      </div>
+    </div>
+
+    <!-- BOARD -->
+    <main id="board">
+      <!-- BAD -->
+      <section class="column" data-col="bad">
+        <div class="col-header">
+          <span class="col-icon">😞</span>
+          <h2>Bad</h2>
+          <span class="col-count" id="count-bad">0</span>
+        </div>
+        <div class="cards-list" id="list-bad"></div>
+        <div class="add-card-area">
+          <button class="btn btn-add" data-col="bad">+ Add Card</button>
+        </div>
+      </section>
+
+      <!-- SAD -->
+      <section class="column" data-col="sad">
+        <div class="col-header">
+          <span class="col-icon">😢</span>
+          <h2>Sad</h2>
+          <span class="col-count" id="count-sad">0</span>
+        </div>
+        <div class="cards-list" id="list-sad"></div>
+        <div class="add-card-area">
+          <button class="btn btn-add" data-col="sad">+ Add Card</button>
+        </div>
+      </section>
+
+      <!-- GLAD -->
+      <section class="column" data-col="glad">
+        <div class="col-header">
+          <span class="col-icon">😊</span>
+          <h2>Glad</h2>
+          <span class="col-count" id="count-glad">0</span>
+        </div>
+        <div class="cards-list" id="list-glad"></div>
+        <div class="add-card-area">
+          <button class="btn btn-add" data-col="glad">+ Add Card</button>
+        </div>
+      </section>
+
+      <!-- ACTION ITEMS -->
+      <section class="column column-action" data-col="action">
+        <div class="col-header">
+          <span class="col-icon">✅</span>
+          <h2>Action Items</h2>
+          <span class="col-count" id="count-action">0</span>
+        </div>
+        <div class="cards-list" id="list-action"></div>
+        <div class="add-card-area">
+          <button class="btn btn-add" data-col="action">+ Add Card</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- ══════════════════════════════ ADD CARD MODAL ════════════════════════════════ -->
+  <div id="modal-add" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modal-add-title">Add Card</h3>
+        <button class="btn btn-icon modal-close" data-modal="modal-add">✕</button>
+      </div>
+      <div class="modal-body">
+        <textarea id="card-text-input" placeholder="What's on your mind?" rows="3" maxlength="500"></textarea>
+        <div class="char-count"><span id="char-count">0</span>/500</div>
+
+        <div class="gif-section">
+          <button id="btn-open-gif" class="btn btn-sm btn-outline">🎞 Add GIF</button>
+          <div id="gif-preview" class="hidden">
+            <img id="gif-preview-img" src="" alt="Selected GIF" />
+            <button id="btn-remove-gif" class="btn btn-icon btn-danger-sm">✕</button>
+          </div>
+        </div>
+
+        <!-- GIF PICKER -->
+        <div id="gif-picker" class="hidden">
+          <div class="gif-search-row">
+            <input id="gif-search-input" type="text" placeholder="Search GIFs (Giphy)…" />
+            <button id="btn-gif-search" class="btn btn-sm btn-primary">🔍</button>
+          </div>
+          <div id="gif-results" class="gif-grid"></div>
+          <p id="gif-attribution" class="gif-attr">Powered by GIPHY</p>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close" data-modal="modal-add">Cancel</button>
+        <button id="btn-submit-card" class="btn btn-primary">Add Card</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════ FACILITATOR MODAL ════════════════════════════ -->
+  <div id="modal-facilitator" class="modal-overlay hidden">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h3>🎭 Facilitator Access</h3>
+        <button class="btn btn-icon modal-close" data-modal="modal-facilitator">✕</button>
+      </div>
+      <div class="modal-body">
+        <p>Enter the facilitator passphrase to take control of this session.</p>
+        <input id="fac-passphrase-input" type="password" placeholder="Passphrase…" />
+        <p id="fac-error" class="error-msg hidden">Incorrect passphrase. Try again.</p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary modal-close" data-modal="modal-facilitator">Cancel</button>
+        <button id="btn-fac-confirm" class="btn btn-primary">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════ EXPORT MODAL ═════════════════════════════════ -->
+  <div id="modal-export" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>📤 Export Action Items</h3>
+        <button class="btn btn-icon modal-close" data-modal="modal-export">✕</button>
+      </div>
+      <div class="modal-body">
+        <textarea id="export-text" readonly rows="12"></textarea>
+      </div>
+      <div class="modal-footer">
+        <button id="btn-copy-export" class="btn btn-secondary">📋 Copy to Clipboard</button>
+        <button id="btn-download-export" class="btn btn-primary">⬇ Download .md</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════ TOAST ════════════════════════════════════════ -->
+  <div id="toast" class="toast hidden"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
