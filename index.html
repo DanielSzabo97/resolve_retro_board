@@ -11,12 +11,30 @@
     deps included) and expose them as globals for app.js to use.
   -->
   <script type="module">
-    import * as Y from 'https://esm.sh/yjs@13.6.15';
-    import { WebrtcProvider } from 'https://esm.sh/y-webrtc@10.3.0?bundle-deps';
-    window.Y = Y;
-    window.WebrtcProvider = WebrtcProvider;
-    // Load app.js only after Yjs globals are ready
-    await import('./app.js');
+    try {
+      const Y = await import('https://esm.sh/yjs@13.6.15');
+      const { WebrtcProvider } = await import('https://esm.sh/y-webrtc@10.3.0?bundle-deps');
+      window.Y = Y;
+      window.WebrtcProvider = WebrtcProvider;
+      await import('./app.js');
+    } catch (err) {
+      console.error('[RetroBoard] Library load failed:', err);
+      document.body.innerHTML =
+        '<div style="font-family:system-ui;padding:32px;max-width:720px;margin:40px auto;'
+        + 'background:#fee;border:2px solid #c33;border-radius:8px;color:#600;">'
+        + '<h2 style="margin-top:0;">⚠ Retro Board failed to load</h2>'
+        + '<p><strong>Error:</strong> ' + (err && err.message ? err.message : err) + '</p>'
+        + '<p>Common causes:</p>'
+        + '<ul>'
+        + '<li>You opened <code>index.html</code> directly from disk (<code>file://</code>). '
+        + 'ES modules require <code>http://</code> or <code>https://</code>. '
+        + 'Run a local server, e.g.:<br><code>cd ' + (location.pathname.split('/').slice(0,-1).join('/') || '.') + ' &amp;&amp; python3 -m http.server 8000</code><br>'
+        + 'then open <code>http://localhost:8000</code>.</li>'
+        + '<li>You are offline or your network blocks <code>esm.sh</code> / <code>cdn.jsdelivr.net</code>.</li>'
+        + '</ul>'
+        + '<p>See the browser DevTools console for the full stack trace.</p>'
+        + '</div>';
+    }
   </script>
 </head>
 <body class="light">
@@ -64,6 +82,7 @@
 
       <div class="header-right">
         <button id="btn-toggle-theme" class="btn btn-icon" title="Toggle theme">🌙</button>
+        <button id="btn-hide-all-global" class="btn btn-outline" title="Blur / unblur all cards for everyone">🌫 Blur All</button>
         <button id="btn-facilitator" class="btn btn-outline" title="Become facilitator">🎭 Facilitator</button>
         <button id="btn-export" class="btn btn-primary" title="Export Action Items">📤 Export</button>
       </div>
@@ -207,9 +226,46 @@
     </div>
   </div>
 
+  <!-- ══════════════════════════════ COMMENTS MODAL ═══════════════════════════════ -->
+  <div id="modal-comments" class="modal-overlay hidden">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="modal-comments-title">💬 Comments</h3>
+        <button class="btn btn-icon modal-close" data-modal="modal-comments">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="comments-card-preview" class="comments-card-preview"></div>
+        <div id="comments-list" class="comments-list"></div>
+        <div class="comments-input-row">
+          <input id="comment-author-input" type="text" placeholder="Your name (optional)" maxlength="40" />
+          <textarea id="comment-text-input" placeholder="Write a comment…" rows="2" maxlength="500"></textarea>
+
+          <!-- GIF picker for comments -->
+          <div class="gif-section">
+            <button id="btn-comment-open-gif" class="btn btn-sm btn-outline">🎞 Add GIF</button>
+            <div id="comment-gif-preview" class="hidden">
+              <img id="comment-gif-preview-img" src="" alt="Selected GIF" />
+              <button id="btn-comment-remove-gif" class="btn btn-icon btn-danger-sm">✕</button>
+            </div>
+          </div>
+          <div id="comment-gif-picker" class="hidden">
+            <div class="gif-search-row">
+              <input id="comment-gif-search-input" type="text" placeholder="Search GIFs (Giphy)…" />
+              <button id="btn-comment-gif-search" class="btn btn-sm btn-primary">🔍</button>
+            </div>
+            <div id="comment-gif-results" class="gif-grid"></div>
+            <p class="gif-attr">Powered by GIPHY</p>
+          </div>
+
+          <button id="btn-add-comment" class="btn btn-primary">Post Comment</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ══════════════════════════════ TOAST ════════════════════════════════════════ -->
   <div id="toast" class="toast hidden"></div>
 
-  <script src="app.js"></script>
+  <!-- app.js is loaded by the <script type="module"> in <head> after Yjs is ready -->
 </body>
 </html>

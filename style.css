@@ -283,15 +283,31 @@ body {
 }
 
 .card.hidden-card {
-  opacity: 0.45;
-  filter: blur(4px);
-  pointer-events: none;
-  user-select: none;
+  position: relative;
 }
+.card.hidden-card .card-text,
+.card.hidden-card .card-gif {
+  filter: blur(8px);
+  user-select: none;
+  pointer-events: none;
+  transition: filter var(--transition);
+}
+.card.hidden-card::after {
+  content: "🌫 blurred";
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: var(--surface2);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  pointer-events: none;
+  letter-spacing: 0.3px;
+}
+/* Facilitators still see a dashed border so they can spot blurred cards easily */
 body.is-facilitator .card.hidden-card {
-  opacity: 0.6;
-  filter: blur(0px);
-  pointer-events: auto;
   border-style: dashed;
 }
 
@@ -445,3 +461,133 @@ textarea:focus, input:focus { border-color: #6c63ff; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+/* ══════════════════════════════════════════════════════
+   COMMENTS
+══════════════════════════════════════════════════════ */
+.comment-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 2px 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  transition: var(--transition);
+}
+.comment-btn:hover {
+  background: var(--surface2);
+  color: var(--text);
+  border-color: var(--text-muted);
+}
+.comment-btn.has-comments {
+  color: var(--text);
+  border-color: var(--col-sad);
+}
+
+.comments-card-preview {
+  background: var(--surface2);
+  border-left: 3px solid var(--col-sad);
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--text-muted);
+  max-height: 100px;
+  overflow: hidden;
+}
+.comments-card-preview strong { color: var(--text); }
+
+.comments-list {
+  max-height: 280px;
+  overflow-y: auto;
+  margin-bottom: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+}
+.comments-list:empty::before {
+  content: "No comments yet — be the first!";
+  display: block;
+  padding: 18px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 13px;
+  font-style: italic;
+}
+.comment-item {
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  position: relative;
+}
+.comment-item:last-child { border-bottom: none; }
+.comment-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+.comment-author { font-weight: 600; color: var(--text); }
+.comment-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  color: var(--text);
+}
+.comment-gif {
+  margin-top: 6px;
+  max-width: 100%;
+  max-height: 150px;
+  border-radius: 6px;
+  display: block;
+}
+.comment-delete {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 4px;
+  opacity: 0;
+  transition: var(--transition);
+}
+.comment-item:hover .comment-delete { opacity: 1; }
+.comment-delete:hover { color: var(--col-bad); }
+
+.comments-input-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.comments-input-row input,
+.comments-input-row textarea {
+  background: var(--input-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  font-family: var(--font);
+  font-size: 13px;
+  color: var(--text);
+  resize: vertical;
+}
+.comments-input-row textarea { min-height: 60px; }
+.comments-input-row input:focus,
+.comments-input-row textarea:focus {
+  outline: none;
+  border-color: var(--col-sad);
+}
+
+/* ══════════════════════════════════════════════════════
+   GLOBAL HIDE-ALL TOGGLE (header button active state)
+══════════════════════════════════════════════════════ */
+#btn-hide-all-global.is-active {
+  background: var(--col-sad);
+  color: #fff;
+  border-color: var(--col-sad);
+}

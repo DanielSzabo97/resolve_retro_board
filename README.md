@@ -35,9 +35,9 @@ A real-time retrospective meeting web app — hosted on **GitHub Pages**, no bac
 4. Anyone with the link joins the same session automatically
 5. To become the **Facilitator**, click 🎭 and enter the **room ID** as the passphrase
 
-### 3. (Optional) Replace Giphy API Key
+### 3. (Optional) Use your own Giphy API key
 
-The default key is a public Giphy beta key. For production, get your own free key at [developers.giphy.com](https://developers.giphy.com) and replace it in `app.js`:
+A working Giphy API key is already baked into `app.js` (it's a public client key). If you want to use your own — for higher rate limits or to keep usage isolated — get a free one at [developers.giphy.com/dashboard](https://developers.giphy.com/dashboard/) and replace the constant in `app.js`:
 
 ```js
 const GIPHY_API_KEY = 'your_api_key_here';

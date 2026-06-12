@@ -8,7 +8,9 @@
 /* ─────────────────────────────────────────────────────
    CONFIG
 ───────────────────────────────────────────────────── */
-const GIPHY_API_KEY = 'GlVGYHkr3WSBnllca54iNt0yFbjz7L59'; // Public Giphy beta key
+// Giphy API key (free, from https://developers.giphy.com/dashboard/).
+// Safe to commit — it's a public client key with strict rate limits.
+const GIPHY_API_KEY = 'nCKHSmRVv64eVvtVPFT6DfFeo3IJ7WKV';
 const COLUMNS = ['bad', 'sad', 'glad', 'action'];
 const COL_LABELS = { bad: '😞 Bad', sad: '😢 Sad', glad: '😊 Glad', action: '✅ Action Items' };
 
@@ -22,6 +24,8 @@ let currentCol = null;       // which column the add-modal targets
 let selectedGifUrl = null;   // gif chosen in picker
 let editingCardId = null;    // null = adding new, string = editing existing
 let myVotes = new Set();     // card IDs this peer has voted on (local only)
+let commentsCardId = null;   // card currently shown in the comments modal
+let selectedCommentGifUrl = null; // gif chosen for the comment-in-progress
 
 /* ─────────────────────────────────────────────────────
    UTILS
@@ -52,6 +56,34 @@ btnTheme.addEventListener('click', () => {
   document.body.classList.toggle('light', !isDark);
   btnTheme.textContent = isDark ? '☀️' : '🌙';
 });
+
+/* ─────────────────────────────────────────────────────
+   GLOBAL BLUR/UNBLUR ALL (anyone can toggle, syncs to all peers)
+───────────────────────────────────────────────────── */
+const btnHideAllGlobal = $('btn-hide-all-global');
+btnHideAllGlobal.addEventListener('click', () => {
+  if (!yCards) { toast('Not connected yet'); return; }
+  // If any card is currently un-blurred, blur all; else un-blur all.
+  let anyVisible = false;
+  yCards.forEach(c => { if (!c.hidden) anyVisible = true; });
+  const blur = anyVisible;
+  ydoc.transact(() => {
+    yCards.forEach((card, id) => {
+      yCards.set(id, Object.assign({}, card, { hidden: blur }));
+    });
+  });
+  toast(blur ? '🌫 All cards blurred for everyone' : '👁 All cards revealed for everyone');
+});
+
+// Keep the button label/active state in sync with the actual data.
+function refreshHideAllButton() {
+  if (!yCards) return;
+  let total = 0, blurredCount = 0;
+  yCards.forEach(c => { total++; if (c.hidden) blurredCount++; });
+  const allBlurred = total > 0 && blurredCount === total;
+  btnHideAllGlobal.classList.toggle('is-active', allBlurred);
+  btnHideAllGlobal.textContent = allBlurred ? '👁 Unblur All' : '🌫 Blur All';
+}
 
 /* ─────────────────────────────────────────────────────
    MODAL CLOSE — generic close buttons
@@ -91,11 +123,23 @@ $('btn-join-room').addEventListener('click', () => {
   launchRoom(roomId, false);
 });
 
-// Auto-join if URL already has a hash
-window.addEventListener('DOMContentLoaded', () => {
+// Auto-join if URL already has a hash.
+// Because app.js is loaded as a dynamic import from a module script,
+// DOMContentLoaded may have already fired by the time we get here.
+function autoJoinFromHash() {
   const hash = window.location.hash.slice(1);
-  if (hash) launchRoom(hash, false);
-});
+  if (hash) {
+    // Restore facilitator status for this room if we were the facilitator
+    // before refreshing (stored per-room in localStorage).
+    const wasFacilitator = localStorage.getItem('facilitator:' + hash) === '1';
+    launchRoom(hash, wasFacilitator);
+  }
+}
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', autoJoinFromHash);
+} else {
+  autoJoinFromHash();
+}
 
 function launchRoom(roomId, isFac) {
   currentRoom = roomId;
@@ -111,11 +155,12 @@ function launchRoom(roomId, isFac) {
   $('lobby').classList.add('hidden');
   $('app').classList.remove('hidden');
 
+  // *** Init Yjs FIRST — activateFacilitator() calls renderAllColumns(), ***
+  // *** which iterates yCards, so yCards must exist before that runs.    ***
+  initYjs(roomId);
+
   // Facilitator UI
   if (isFacilitator) activateFacilitator();
-
-  // Init Yjs
-  initYjs(roomId);
 }
 
 /* ─────────────────────────────────────────────────────
@@ -130,9 +175,16 @@ $('room-badge').addEventListener('click', () => {
    Yjs + WebRTC
 ═══════════════════════════════════════════════════════ */
 function initYjs(roomId) {
+  // Hard fail fast & loud if the Yjs library didn't load.
+  if (typeof Y === 'undefined' || !Y || !Y.Doc) {
+    const msg = 'Yjs library failed to load. If you opened index.html directly (file://), serve it through a local web server instead (e.g. `npx serve` or `python3 -m http.server`). ES modules do not work over file://.';
+    console.error('[RetroBoard]', msg);
+    toast('⚠ ' + msg, 10000);
+    return;
+  }
+
   ydoc = new Y.Doc();
 
-  // yCards: Y.Array of card objects (plain JS objects stored as Y.Map entries)
   // We use a Y.Map keyed by cardId for easy updates
   yCards = ydoc.getMap('cards');
   yMeta  = ydoc.getMap('meta');   // { votesVisible: bool }
@@ -142,27 +194,36 @@ function initYjs(roomId) {
     ydoc.transact(() => yMeta.set('votesVisible', true));
   }
 
-  // WebRTC provider — connects peers in the same room
-  provider = new WebrtcProvider(roomId, ydoc, {
-    signaling: ['wss://signaling.yjs.dev', 'wss://y-webrtc-signaling-eu.herokuapp.com'],
-    maxConns: 20,
-    filterBcConns: false,
-  });
-
-  // Peer count
-  provider.awareness.on('change', updatePeerCount);
-  provider.awareness.setLocalState({ online: true });
-
-  // Observe card changes → re-render
+  // *** Register observers BEFORE any potentially-throwing network setup, ***
+  // *** so local card adding always re-renders even if WebRTC fails.       ***
   yCards.observe(() => renderAllColumns());
-
-  // Observe meta changes
   yMeta.observe(() => applyVoteVisibility());
 
   renderAllColumns();
+
+  // WebRTC provider — connects peers in the same room.
+  // Wrapped in try/catch so a transport failure doesn't break the local UI.
+  try {
+    if (typeof WebrtcProvider === 'undefined') {
+      throw new Error('WebrtcProvider is not defined (y-webrtc failed to load)');
+    }
+    provider = new WebrtcProvider(roomId, ydoc, {
+      // Note: y-webrtc-signaling-eu.herokuapp.com was shut down with Heroku's
+      // free tier in 2022, so we only use the official signaling server.
+      signaling: ['wss://signaling.yjs.dev'],
+      maxConns: 20,
+      filterBcConns: false,
+    });
+    provider.awareness.on('change', updatePeerCount);
+    provider.awareness.setLocalState({ online: true });
+  } catch (err) {
+    console.error('[RetroBoard] WebRTC init failed:', err);
+    toast('⚠ Real-time sync unavailable: ' + err.message + ' (cards still work locally)', 6000);
+  }
 }
 
 function updatePeerCount() {
+  if (!provider) { $('peer-count-num').textContent = '1'; return; }
   const states = provider.awareness.getStates();
   $('peer-count-num').textContent = states.size;
 }
@@ -201,6 +262,8 @@ function activateFacilitator() {
   document.body.classList.add('is-facilitator');
   $('btn-facilitator').textContent = '🎭 Facilitator ✓';
   $('btn-facilitator').classList.add('btn-success');
+  // Remember across page refreshes (per-room).
+  if (currentRoom) localStorage.setItem('facilitator:' + currentRoom, '1');
   renderAllColumns();
 }
 
@@ -343,31 +406,52 @@ $('gif-search-input').addEventListener('keydown', e => {
 });
 
 async function searchGiphy(query) {
-  $('gif-results').innerHTML = '<p style="color:var(--text-muted);font-size:13px;padding:8px;">Searching…</p>';
+  return searchGiphyInto(query, $('gif-results'), () => selectedGifUrl, (url, imgEl) => selectGif(url, imgEl));
+}
+
+/**
+ * Generic Giphy search that renders results into an arbitrary container
+ * and calls a callback when the user picks one.
+ */
+async function searchGiphyInto(query, resultsEl, getSelected, onPick) {
+  resultsEl.innerHTML = '<p style="color:var(--text-muted);font-size:13px;padding:8px;">Searching…</p>';
   try {
-    const url = `https://api.giphy.com/v1/gifs/search?api_key=${GIPHY_API_KEY}&q=${encodeURIComponent(query)}&limit=18&rating=g`;
+    const url = `https://api.giphy.com/v1/gifs/search?api_key=${encodeURIComponent(GIPHY_API_KEY)}&q=${encodeURIComponent(query)}&limit=18&rating=g`;
     const res = await fetch(url);
     const data = await res.json();
-    renderGifResults(data.data || []);
+
+    const status = data && data.meta && data.meta.status;
+    if (status && status !== 200) {
+      console.error('[Giphy] error response:', data.meta);
+      resultsEl.innerHTML = `<p style="color:#ff6b6b;font-size:13px;padding:8px;">Giphy error: ${data.meta.msg || status}</p>`;
+      return;
+    }
+    renderGifResultsInto(data.data || [], resultsEl, getSelected, onPick);
   } catch (err) {
-    $('gif-results').innerHTML = '<p style="color:#ff6b6b;font-size:13px;padding:8px;">Failed to load GIFs. Check your connection.</p>';
+    console.error('[Giphy] fetch failed:', err);
+    resultsEl.innerHTML = '<p style="color:#ff6b6b;font-size:13px;padding:8px;">Failed to load GIFs. Check your connection.</p>';
   }
 }
 
+
 function renderGifResults(gifs) {
+  renderGifResultsInto(gifs, $('gif-results'), () => selectedGifUrl, (url, imgEl) => selectGif(url, imgEl));
+}
+
+function renderGifResultsInto(gifs, resultsEl, getSelected, onPick) {
   if (!gifs.length) {
-    $('gif-results').innerHTML = '<p style="color:var(--text-muted);font-size:13px;padding:8px;">No GIFs found.</p>';
+    resultsEl.innerHTML = '<p style="color:var(--text-muted);font-size:13px;padding:8px;">No GIFs found.</p>';
     return;
   }
-  $('gif-results').innerHTML = '';
+  resultsEl.innerHTML = '';
   gifs.forEach(gif => {
     const img = document.createElement('img');
     img.src = gif.images.fixed_height_small.url;
     img.alt = gif.title;
     img.title = gif.title;
-    if (selectedGifUrl === gif.images.original.url) img.classList.add('selected');
-    img.addEventListener('click', () => selectGif(gif.images.original.url, img));
-    $('gif-results').appendChild(img);
+    if (getSelected() === gif.images.original.url) img.classList.add('selected');
+    img.addEventListener('click', () => onPick(gif.images.original.url, img));
+    resultsEl.appendChild(img);
   });
 }
 
@@ -391,8 +475,11 @@ $('btn-remove-gif').addEventListener('click', () => {
    RENDER CARDS
 ═══════════════════════════════════════════════════════ */
 function renderAllColumns() {
+  if (!yCards) return; // Yjs not ready yet — nothing to render
   COLUMNS.forEach(col => renderColumn(col));
   applyVoteVisibility();
+  refreshOpenCommentsModal();
+  refreshHideAllButton();
 }
 
 function renderColumn(col) {
@@ -454,6 +541,15 @@ function createCardEl(card) {
   const actions = document.createElement('div');
   actions.className = 'card-actions';
 
+  // Comments button — shows count, opens comments modal
+  const commentCount = (card.comments || []).length;
+  const commentBtn = document.createElement('button');
+  commentBtn.className = 'comment-btn' + (commentCount > 0 ? ' has-comments' : '');
+  commentBtn.innerHTML = `<span>💬</span><span>${commentCount}</span>`;
+  commentBtn.title = commentCount > 0 ? `${commentCount} comment${commentCount !== 1 ? 's' : ''}` : 'Add a comment';
+  commentBtn.addEventListener('click', () => openCommentsModal(card.id));
+  actions.appendChild(commentBtn);
+
   // Edit button (only card owner can edit — we track by client session; simpler: everyone can edit)
   const editBtn = document.createElement('button');
   editBtn.className = 'btn btn-icon';
@@ -463,15 +559,7 @@ function createCardEl(card) {
   editBtn.addEventListener('click', () => openAddModal(card.col, card.id));
   actions.appendChild(editBtn);
 
-  // Hide/unhide (facilitator only)
-  if (isFacilitator) {
-    const hideBtn = document.createElement('button');
-    hideBtn.className = 'hide-toggle-btn';
-    hideBtn.textContent = card.hidden ? '👁' : '🙈';
-    hideBtn.title = card.hidden ? 'Reveal card' : 'Hide card';
-    hideBtn.addEventListener('click', () => toggleCardHidden(card.id, !card.hidden));
-    actions.appendChild(hideBtn);
-  }
+  // (Per-card blur button removed — use the global "🌫 Blur All" button in the header.)
 
   // Delete button
   const deleteBtn = document.createElement('button');
@@ -505,19 +593,201 @@ function toggleVote(cardId) {
   }
 }
 
-function toggleCardHidden(cardId, hide) {
-  if (!isFacilitator) return;
-  const card = yCards.get(cardId);
-  if (!card) return;
-  const updated = Object.assign({}, card, { hidden: hide });
-  ydoc.transact(() => yCards.set(cardId, updated));
-}
-
 function deleteCard(cardId) {
   if (!confirm('Delete this card?')) return;
   ydoc.transact(() => yCards.delete(cardId));
   myVotes.delete(cardId);
   toast('🗑 Card deleted');
+}
+
+/* ═══════════════════════════════════════════════════════
+   COMMENTS
+═══════════════════════════════════════════════════════ */
+function openCommentsModal(cardId) {
+  const card = yCards.get(cardId);
+  if (!card) return;
+  commentsCardId = cardId;
+
+  // Card preview at top of modal
+  const previewText = card.text ? card.text : '(GIF card)';
+  $('comments-card-preview').innerHTML =
+    `<strong>${COL_LABELS[card.col] || card.col}</strong> — ${escapeHtml(previewText)}`;
+
+  // Restore author name if previously set
+  const savedAuthor = localStorage.getItem('commentAuthor') || '';
+  $('comment-author-input').value = savedAuthor;
+  $('comment-text-input').value = '';
+
+  // Reset the comment GIF picker
+  selectedCommentGifUrl = null;
+  $('comment-gif-preview').classList.add('hidden');
+  $('comment-gif-preview-img').src = '';
+  $('comment-gif-picker').classList.add('hidden');
+  $('comment-gif-results').innerHTML = '';
+  $('comment-gif-search-input').value = '';
+
+  renderComments(card);
+  openModal('modal-comments');
+  setTimeout(() => $('comment-text-input').focus(), 100);
+}
+
+function renderComments(card) {
+  const list = $('comments-list');
+  list.innerHTML = '';
+  const comments = (card.comments || []).slice().sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+  comments.forEach(c => {
+    const item = document.createElement('div');
+    item.className = 'comment-item';
+
+    const meta = document.createElement('div');
+    meta.className = 'comment-meta';
+    const left = document.createElement('span');
+    const author = c.author && c.author.trim() ? c.author : 'Anonymous';
+    const when = c.createdAt ? new Date(c.createdAt).toLocaleString() : '';
+    left.innerHTML = `<span class="comment-author">${escapeHtml(author)}</span> · ${when}`;
+    meta.appendChild(left);
+
+    const del = document.createElement('button');
+    del.className = 'comment-delete';
+    del.textContent = '🗑';
+    del.title = 'Delete comment';
+    del.addEventListener('click', () => deleteComment(card.id, c.id));
+    meta.appendChild(del);
+
+    item.appendChild(meta);
+
+    if (c.text) {
+      const txt = document.createElement('p');
+      txt.className = 'comment-text';
+      txt.textContent = c.text;
+      item.appendChild(txt);
+    }
+    if (c.gif) {
+      const img = document.createElement('img');
+      img.className = 'comment-gif';
+      img.src = c.gif;
+      img.alt = 'GIF';
+      img.loading = 'lazy';
+      item.appendChild(img);
+    }
+
+    list.appendChild(item);
+  });
+}
+
+function addComment() {
+  if (!commentsCardId) return;
+  const card = yCards.get(commentsCardId);
+  if (!card) return;
+
+  const text = $('comment-text-input').value.trim();
+  if (!text && !selectedCommentGifUrl) {
+    toast('Write something or pick a GIF');
+    return;
+  }
+
+  const author = $('comment-author-input').value.trim();
+  if (author) localStorage.setItem('commentAuthor', author);
+
+  const newComment = {
+    id: uid(),
+    text,
+    gif: selectedCommentGifUrl || null,
+    author,
+    createdAt: Date.now(),
+  };
+  const updated = Object.assign({}, card, {
+    comments: [...(card.comments || []), newComment],
+  });
+  ydoc.transact(() => yCards.set(commentsCardId, updated));
+
+  // Reset inputs
+  $('comment-text-input').value = '';
+  selectedCommentGifUrl = null;
+  $('comment-gif-preview').classList.add('hidden');
+  $('comment-gif-preview-img').src = '';
+
+  renderComments(yCards.get(commentsCardId));
+  toast('💬 Comment posted');
+}
+
+function deleteComment(cardId, commentId) {
+  if (!confirm('Delete this comment?')) return;
+  const card = yCards.get(cardId);
+  if (!card) return;
+  const updated = Object.assign({}, card, {
+    comments: (card.comments || []).filter(c => c.id !== commentId),
+  });
+  ydoc.transact(() => yCards.set(cardId, updated));
+  if (commentsCardId === cardId) renderComments(updated);
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+// Wire up the comments modal
+$('btn-add-comment').addEventListener('click', addComment);
+$('comment-text-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) addComment();
+});
+
+// --- Comment GIF picker ---------------------------------------------------
+$('btn-comment-open-gif').addEventListener('click', () => {
+  const picker = $('comment-gif-picker');
+  picker.classList.toggle('hidden');
+  if (!picker.classList.contains('hidden')) {
+    $('comment-gif-search-input').focus();
+    if (!$('comment-gif-results').innerHTML) searchCommentGiphy('reaction');
+  }
+});
+
+$('btn-comment-gif-search').addEventListener('click', () => {
+  searchCommentGiphy($('comment-gif-search-input').value.trim() || 'reaction');
+});
+$('comment-gif-search-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    searchCommentGiphy($('comment-gif-search-input').value.trim() || 'reaction');
+  }
+});
+
+$('btn-comment-remove-gif').addEventListener('click', () => {
+  selectedCommentGifUrl = null;
+  $('comment-gif-preview').classList.add('hidden');
+  $('comment-gif-preview-img').src = '';
+});
+
+function searchCommentGiphy(query) {
+  return searchGiphyInto(
+    query,
+    $('comment-gif-results'),
+    () => selectedCommentGifUrl,
+    (url, imgEl) => selectCommentGif(url, imgEl)
+  );
+}
+
+function selectCommentGif(url, imgEl) {
+  selectedCommentGifUrl = url;
+  document.querySelectorAll('#comment-gif-results img').forEach(i => i.classList.remove('selected'));
+  imgEl.classList.add('selected');
+  $('comment-gif-preview-img').src = url;
+  $('comment-gif-preview').classList.remove('hidden');
+  $('comment-gif-picker').classList.add('hidden');
+  toast('🎞 GIF selected!');
+}
+
+// Keep the open comments modal live-synced when cards change remotely
+function refreshOpenCommentsModal() {
+  if (!commentsCardId) return;
+  if ($('modal-comments').classList.contains('hidden')) return;
+  const card = yCards.get(commentsCardId);
+  if (card) renderComments(card);
 }
 
 /* ═══════════════════════════════════════════════════════
@@ -543,6 +813,13 @@ $('btn-export').addEventListener('click', () => {
       md += `- [ ] ${card.text || '(GIF card)'}`;
       if (card.votes) md += `  *(${card.votes} vote${card.votes !== 1 ? 's' : ''})*`;
       md += '\n';
+      (card.comments || []).forEach(c => {
+        const author = c.author && c.author.trim() ? c.author : 'Anonymous';
+        const body = c.text || (c.gif ? '(GIF)' : '');
+        md += `    - 💬 **${author}:** ${body}`;
+        if (c.gif) md += `  \n        ![](${c.gif})`;
+        md += '\n';
+      });
     });
   }
 
