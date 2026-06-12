@@ -6,13 +6,30 @@
 'use strict';
 
 /* ─────────────────────────────────────────────────────
+   IMPORTS — pure helpers live in lib.js so they can be
+   unit-tested without a DOM/Yjs runtime.
+───────────────────────────────────────────────────── */
+import {
+  COLUMNS,
+  COL_LABELS,
+  uid,
+  generateRoomId,
+  parseRoomFromInput,
+  escapeHtml,
+  cardsByColumn,
+  blurButtonState,
+  buildExportMarkdown,
+  classifyGiphyStatus,
+  addCommentToCard,
+  removeCommentFromCard,
+} from './lib.js';
+
+/* ─────────────────────────────────────────────────────
    CONFIG
 ───────────────────────────────────────────────────── */
 // Giphy API key (free, from https://developers.giphy.com/dashboard/).
 // Safe to commit — it's a public client key with strict rate limits.
 const GIPHY_API_KEY = 'nCKHSmRVv64eVvtVPFT6DfFeo3IJ7WKV';
-const COLUMNS = ['bad', 'sad', 'glad', 'action'];
-const COL_LABELS = { bad: '😞 Bad', sad: '😢 Sad', glad: '😊 Glad', action: '✅ Action Items' };
 
 /* ─────────────────────────────────────────────────────
    STATE
@@ -28,11 +45,8 @@ let commentsCardId = null;   // card currently shown in the comments modal
 let selectedCommentGifUrl = null; // gif chosen for the comment-in-progress
 
 /* ─────────────────────────────────────────────────────
-   UTILS
+   UTILS (DOM-bound)
 ───────────────────────────────────────────────────── */
-function uid() {
-  return Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
-}
 
 function toast(msg, duration = 2500) {
   const el = document.getElementById('toast');
@@ -62,12 +76,12 @@ btnTheme.addEventListener('click', () => {
 ───────────────────────────────────────────────────── */
 const btnHideAllGlobal = $('btn-hide-all-global');
 btnHideAllGlobal.addEventListener('click', () => {
-  if (!yCards) { toast('Not connected yet'); return; }
-  // If any card is currently un-blurred, blur all; else un-blur all.
-  let anyVisible = false;
-  yCards.forEach(c => { if (!c.hidden) anyVisible = true; });
-  const blur = anyVisible;
+  if (!yCards || !yMeta) { toast('Not connected yet'); return; }
+  // Flip the persistent "blurAll" flag and apply it to every existing card.
+  // Storing the mode in yMeta means newly-added cards also pick it up.
+  const blur = !(yMeta.get('blurAll') === true);
   ydoc.transact(() => {
+    yMeta.set('blurAll', blur);
     yCards.forEach((card, id) => {
       yCards.set(id, Object.assign({}, card, { hidden: blur }));
     });
@@ -75,14 +89,12 @@ btnHideAllGlobal.addEventListener('click', () => {
   toast(blur ? '🌫 All cards blurred for everyone' : '👁 All cards revealed for everyone');
 });
 
-// Keep the button label/active state in sync with the actual data.
+// Keep the button label/active state in sync with the actual mode.
 function refreshHideAllButton() {
-  if (!yCards) return;
-  let total = 0, blurredCount = 0;
-  yCards.forEach(c => { total++; if (c.hidden) blurredCount++; });
-  const allBlurred = total > 0 && blurredCount === total;
-  btnHideAllGlobal.classList.toggle('is-active', allBlurred);
-  btnHideAllGlobal.textContent = allBlurred ? '👁 Unblur All' : '🌫 Blur All';
+  if (!yMeta) return;
+  const state = blurButtonState(yMeta.get('blurAll') === true);
+  btnHideAllGlobal.classList.toggle('is-active', state.active);
+  btnHideAllGlobal.textContent = state.label;
 }
 
 /* ─────────────────────────────────────────────────────
@@ -100,26 +112,14 @@ document.querySelectorAll('.modal-overlay').forEach(overlay => {
 /* ═══════════════════════════════════════════════════════
    LOBBY / ROOM
 ═══════════════════════════════════════════════════════ */
-function generateRoomId() {
-  const words = ['alpha','bravo','charlie','delta','echo','foxtrot','golf',
-                 'hotel','india','juliet','kilo','lima','mike','november',
-                 'oscar','papa','quebec','romeo','sierra','tango'];
-  const pick = () => words[Math.floor(Math.random() * words.length)];
-  return `${pick()}-${pick()}-${Math.floor(1000 + Math.random() * 9000)}`;
-}
-
 $('btn-new-room').addEventListener('click', () => {
   const roomId = generateRoomId();
   launchRoom(roomId, true);
 });
 
 $('btn-join-room').addEventListener('click', () => {
-  const raw = $('join-room-input').value.trim();
-  if (!raw) { toast('Please enter a room link or ID'); return; }
-  // accept full URL or just the hash/id
-  let roomId = raw;
-  if (raw.includes('#')) roomId = raw.split('#').pop();
-  if (!roomId) { toast('Invalid room link'); return; }
+  const roomId = parseRoomFromInput($('join-room-input').value);
+  if (!roomId) { toast('Please enter a valid room link or ID'); return; }
   launchRoom(roomId, false);
 });
 
@@ -187,19 +187,15 @@ function initYjs(roomId) {
 
   // We use a Y.Map keyed by cardId for easy updates
   yCards = ydoc.getMap('cards');
-  yMeta  = ydoc.getMap('meta');   // { votesVisible: bool }
-
-  // Default meta
-  if (!yMeta.has('votesVisible')) {
-    ydoc.transact(() => yMeta.set('votesVisible', true));
-  }
+  yMeta  = ydoc.getMap('meta');   // { blurAll: bool }
 
   // *** Register observers BEFORE any potentially-throwing network setup, ***
   // *** so local card adding always re-renders even if WebRTC fails.       ***
   yCards.observe(() => renderAllColumns());
-  yMeta.observe(() => applyVoteVisibility());
+  yMeta.observe(() => refreshHideAllButton());
 
   renderAllColumns();
+  refreshHideAllButton();
 
   // ── Transport #1: WebSocket (RELIABLE) ────────────────────────────────
   // demos.yjs.dev is the official public Yjs websocket broker. Acts as a
@@ -314,21 +310,6 @@ $('btn-reveal-all').addEventListener('click', () => {
   toast('👁 All cards revealed');
 });
 
-$('btn-reveal-votes').addEventListener('click', () => {
-  if (!isFacilitator) return;
-  const current = yMeta.get('votesVisible');
-  ydoc.transact(() => yMeta.set('votesVisible', !current));
-  toast(current ? '🗳 Vote counts hidden' : '🗳 Vote counts visible');
-});
-
-function applyVoteVisibility() {
-  const visible = yMeta.get('votesVisible') !== false;
-  COLUMNS.forEach(col => {
-    const list = $(`list-${col}`);
-    if (visible) list.classList.remove('votes-hidden');
-    else          list.classList.add('votes-hidden');
-  });
-}
 
 /* ═══════════════════════════════════════════════════════
    ADD CARD MODAL
@@ -336,6 +317,35 @@ function applyVoteVisibility() {
 document.querySelectorAll('.btn-add').forEach(btn => {
   btn.addEventListener('click', () => openAddModal(btn.dataset.col));
 });
+
+/* ─────────────────────────────────────────────────────
+   CLEAR COLUMN — delete every card in a single column
+───────────────────────────────────────────────────── */
+document.querySelectorAll('.col-clear-btn').forEach(btn => {
+  btn.addEventListener('click', () => clearColumn(btn.dataset.col));
+});
+
+function clearColumn(col) {
+  if (!yCards) { toast('Not connected yet'); return; }
+  // Collect card IDs for this column first (don't mutate while iterating)
+  const ids = [];
+  yCards.forEach((card, id) => {
+    if (card.col === col) ids.push(id);
+  });
+  if (ids.length === 0) {
+    toast(`${COL_LABELS[col] || col} is already empty`);
+    return;
+  }
+  const label = COL_LABELS[col] || col;
+  if (!confirm(`Delete all ${ids.length} card${ids.length === 1 ? '' : 's'} in "${label}"? This cannot be undone.`)) {
+    return;
+  }
+  ydoc.transact(() => {
+    ids.forEach(id => yCards.delete(id));
+  });
+  ids.forEach(id => myVotes.delete(id));
+  toast(`🗑 Cleared ${ids.length} card${ids.length === 1 ? '' : 's'} from ${label}`);
+}
 
 function openAddModal(col, cardId = null) {
   currentCol = col;
@@ -393,14 +403,16 @@ function submitCard() {
     ydoc.transact(() => yCards.set(editingCardId, updated));
     toast('✏️ Card updated');
   } else {
-    // New card
+    // New card — inherit the room's current blur mode so it doesn't
+    // pop into view when everything else is currently blurred.
+    const blurAll = yMeta && yMeta.get('blurAll') === true;
     const card = {
       id: uid(),
       col: currentCol,
       text: text,
       gif: selectedGifUrl || null,
       votes: 0,
-      hidden: false,
+      hidden: blurAll,
       createdAt: Date.now(),
     };
     ydoc.transact(() => yCards.set(card.id, card));
@@ -444,10 +456,11 @@ async function searchGiphyInto(query, resultsEl, getSelected, onPick) {
     const res = await fetch(url);
     const data = await res.json();
 
-    const status = data && data.meta && data.meta.status;
-    if (status && status !== 200) {
-      console.error('[Giphy] error response:', data.meta);
-      resultsEl.innerHTML = `<p style="color:#ff6b6b;font-size:13px;padding:8px;">Giphy error: ${data.meta.msg || status}</p>`;
+    const kind = classifyGiphyStatus(data && data.meta);
+    if (kind !== 'ok') {
+      console.error('[Giphy] error response:', data && data.meta);
+      const msg = (data && data.meta && data.meta.msg) || (data && data.meta && data.meta.status) || 'error';
+      resultsEl.innerHTML = `<p style="color:#ff6b6b;font-size:13px;padding:8px;">Giphy error: ${msg}</p>`;
       return;
     }
     renderGifResultsInto(data.data || [], resultsEl, getSelected, onPick);
@@ -501,7 +514,6 @@ $('btn-remove-gif').addEventListener('click', () => {
 function renderAllColumns() {
   if (!yCards) return; // Yjs not ready yet — nothing to render
   COLUMNS.forEach(col => renderColumn(col));
-  applyVoteVisibility();
   refreshOpenCommentsModal();
   refreshHideAllButton();
 }
@@ -510,13 +522,7 @@ function renderColumn(col) {
   const list = $(`list-${col}`);
   const countEl = $(`count-${col}`);
 
-  // Gather cards for this column, sorted by createdAt
-  const cards = [];
-  yCards.forEach((card) => {
-    if (card.col === col) cards.push(card);
-  });
-  cards.sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
-
+  const cards = cardsByColumn(yCards, col);
   countEl.textContent = cards.length;
 
   // Diff: only update what changed to avoid flicker
@@ -720,9 +726,7 @@ function addComment() {
     author,
     createdAt: Date.now(),
   };
-  const updated = Object.assign({}, card, {
-    comments: [...(card.comments || []), newComment],
-  });
+  const updated = addCommentToCard(card, newComment);
   ydoc.transact(() => yCards.set(commentsCardId, updated));
 
   // Reset inputs
@@ -739,21 +743,11 @@ function deleteComment(cardId, commentId) {
   if (!confirm('Delete this comment?')) return;
   const card = yCards.get(cardId);
   if (!card) return;
-  const updated = Object.assign({}, card, {
-    comments: (card.comments || []).filter(c => c.id !== commentId),
-  });
+  const updated = removeCommentFromCard(card, commentId);
   ydoc.transact(() => yCards.set(cardId, updated));
   if (commentsCardId === cardId) renderComments(updated);
 }
 
-function escapeHtml(s) {
-  return String(s)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
-}
 
 // Wire up the comments modal
 $('btn-add-comment').addEventListener('click', addComment);
@@ -822,34 +816,7 @@ $('btn-export').addEventListener('click', () => {
   yCards.forEach(card => {
     if (card.col === 'action') actionCards.push(card);
   });
-  actionCards.sort((a, b) => (b.votes || 0) - (a.votes || 0));
-
-  const date = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' });
-  let md = `# 📋 Retro Action Items\n`;
-  md    += `**Date:** ${date}  \n`;
-  md    += `**Room:** ${currentRoom}\n\n`;
-  md    += `---\n\n`;
-
-  if (actionCards.length === 0) {
-    md += '_No action items recorded._\n';
-  } else {
-    actionCards.forEach((card, i) => {
-      md += `- [ ] ${card.text || '(GIF card)'}`;
-      if (card.votes) md += `  *(${card.votes} vote${card.votes !== 1 ? 's' : ''})*`;
-      md += '\n';
-      (card.comments || []).forEach(c => {
-        const author = c.author && c.author.trim() ? c.author : 'Anonymous';
-        const body = c.text || (c.gif ? '(GIF)' : '');
-        md += `    - 💬 **${author}:** ${body}`;
-        if (c.gif) md += `  \n        ![](${c.gif})`;
-        md += '\n';
-      });
-    });
-  }
-
-  md += `\n---\n*Exported from Retro Board*\n`;
-
-  $('export-text').value = md;
+  $('export-text').value = buildExportMarkdown(actionCards, currentRoom);
   openModal('modal-export');
 });
 

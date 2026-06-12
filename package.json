@@ -1,0 +1,16 @@
+{
+  "name": "retro-board",
+  "version": "1.0.0",
+  "description": "Real-time retrospective board (Yjs + WebRTC/WebSocket, no backend).",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "serve": "python3 -m http.server 8000"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9"
+  }
+}
+

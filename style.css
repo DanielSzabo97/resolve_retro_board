@@ -262,6 +262,22 @@ body {
   background: var(--surface2); color: var(--text-muted);
   border-radius: 20px; padding: 2px 9px; font-size: 12px; font-weight: 600;
 }
+.col-clear-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 4px 6px;
+  border-radius: 6px;
+  color: var(--text-muted);
+  opacity: 0.5;
+  transition: var(--transition);
+}
+.col-clear-btn:hover {
+  opacity: 1;
+  color: var(--col-bad);
+  background: rgba(255,107,107,0.12);
+}
 
 .cards-list { display: flex; flex-direction: column; gap: 10px; min-height: 40px; }
 
@@ -286,7 +302,8 @@ body {
   position: relative;
 }
 .card.hidden-card .card-text,
-.card.hidden-card .card-gif {
+.card.hidden-card .card-gif,
+.card.hidden-card .vote-count {
   filter: blur(8px);
   user-select: none;
   pointer-events: none;
@@ -332,7 +349,6 @@ body.is-facilitator .card.hidden-card {
 .vote-btn.voted { background: #6c63ff; color: #fff; border-color: #6c63ff; }
 .vote-btn .vote-count { font-weight: 600; min-width: 14px; text-align: center; }
 
-.votes-hidden .vote-btn .vote-count { visibility: hidden; }
 
 .hide-toggle-btn {
   background: transparent; border: none; cursor: pointer;

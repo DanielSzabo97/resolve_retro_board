@@ -60,8 +60,26 @@ const GIPHY_API_KEY = 'your_api_key_here';
 
 ```
 retro-board/
-├── index.html   # Layout & modals
-├── style.css    # All styles (light + dark theme)
-├── app.js       # All logic (Yjs, cards, voting, GIF, export)
-└── README.md    # This file
+├── index.html      # Layout & modals
+├── style.css       # All styles (light + dark theme)
+├── app.js          # DOM wiring, Yjs setup, event handlers
+├── lib.js          # Pure helpers (testable without DOM / Yjs)
+├── lib.test.js     # Vitest unit tests for lib.js
+├── package.json    # Dev deps (vitest) & npm scripts
+└── README.md       # This file
 ```
+
+## 🧪 Tests
+
+Pure logic lives in `lib.js` so it can be unit-tested without a browser.
+
+```sh
+npm install        # one-time, installs vitest
+npm test           # run the suite once
+npm run test:watch # re-run on file changes
+```
+
+Currently **42 tests** covering: room ID generation & parsing, HTML escaping,
+column filtering/sorting, blur-button state, Giphy status classification,
+immutable comment helpers, and the markdown export builder.
+

@@ -96,7 +96,6 @@
       <div class="fac-actions">
         <button id="btn-hide-all" class="btn btn-sm btn-warning">👁 Hide All Cards</button>
         <button id="btn-reveal-all" class="btn btn-sm btn-success">👁 Reveal All Cards</button>
-        <button id="btn-reveal-votes" class="btn btn-sm btn-info">🗳 Toggle Vote Counts</button>
       </div>
     </div>
 
@@ -108,6 +107,7 @@
           <span class="col-icon">😞</span>
           <h2>Bad</h2>
           <span class="col-count" id="count-bad">0</span>
+          <button class="col-clear-btn" data-col="bad" title="Clear all cards in this column">🗑</button>
         </div>
         <div class="cards-list" id="list-bad"></div>
         <div class="add-card-area">
@@ -121,6 +121,7 @@
           <span class="col-icon">😢</span>
           <h2>Sad</h2>
           <span class="col-count" id="count-sad">0</span>
+          <button class="col-clear-btn" data-col="sad" title="Clear all cards in this column">🗑</button>
         </div>
         <div class="cards-list" id="list-sad"></div>
         <div class="add-card-area">
@@ -134,6 +135,7 @@
           <span class="col-icon">😊</span>
           <h2>Glad</h2>
           <span class="col-count" id="count-glad">0</span>
+          <button class="col-clear-btn" data-col="glad" title="Clear all cards in this column">🗑</button>
         </div>
         <div class="cards-list" id="list-glad"></div>
         <div class="add-card-area">
@@ -147,6 +149,7 @@
           <span class="col-icon">✅</span>
           <h2>Action Items</h2>
           <span class="col-count" id="count-action">0</span>
+          <button class="col-clear-btn" data-col="action" title="Clear all cards in this column">🗑</button>
         </div>
         <div class="cards-list" id="list-action"></div>
         <div class="add-card-area">
