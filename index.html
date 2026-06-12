@@ -76,15 +76,15 @@
       </div>
 
       <div class="header-center">
-        <div id="peer-count" class="peer-count" title="Connected peers">
+        <button id="peer-count" class="peer-count" title="Click to see who's here">
           <span class="peer-dot"></span>
           <span id="peer-count-num">1</span> connected
-        </div>
+        </button>
       </div>
 
       <div class="header-right">
         <button id="btn-toggle-theme" class="btn btn-icon" title="Toggle theme">🌙</button>
-        <button id="btn-hide-all-global" class="btn btn-outline" title="Blur / unblur all cards for everyone">🌫 Blur All</button>
+        <button id="btn-hide-all-global" class="btn btn-outline hidden" title="Blur / unblur all cards for everyone (facilitator only)">🌫 Blur All</button>
         <button id="btn-facilitator" class="btn btn-outline" title="Become facilitator">🎭 Facilitator</button>
         <button id="btn-export" class="btn btn-primary" title="Export Action Items">📤 Export</button>
       </div>
@@ -94,8 +94,7 @@
     <div id="facilitator-bar" class="hidden">
       <span class="fac-label">🎭 You are the Facilitator</span>
       <div class="fac-actions">
-        <button id="btn-hide-all" class="btn btn-sm btn-warning">👁 Hide All Cards</button>
-        <button id="btn-reveal-all" class="btn btn-sm btn-success">👁 Reveal All Cards</button>
+        <button id="btn-release-fac" class="btn btn-sm btn-outline" title="Release the facilitator role so someone else can claim it">🔓 Release Role</button>
       </div>
     </div>
 
@@ -206,6 +205,7 @@
         <p>Enter the facilitator passphrase to take control of this session.</p>
         <input id="fac-passphrase-input" type="password" placeholder="Passphrase…" />
         <p id="fac-error" class="error-msg hidden">Incorrect passphrase. Try again.</p>
+        <p id="fac-taken-msg" class="error-msg hidden">This room already has a facilitator. Only one facilitator is allowed.</p>
       </div>
       <div class="modal-footer">
         <button class="btn btn-secondary modal-close" data-modal="modal-facilitator">Cancel</button>
@@ -264,6 +264,26 @@
 
           <button id="btn-add-comment" class="btn btn-primary">Post Comment</button>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ══════════════════════════════ PARTICIPANTS MODAL ═══════════════════════════ -->
+  <div id="modal-participants" class="modal-overlay hidden">
+    <div class="modal modal-sm">
+      <div class="modal-header">
+        <h3>👥 Participants</h3>
+        <button class="btn btn-icon modal-close" data-modal="modal-participants">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="participants-me-row">
+          <label for="my-display-name-input">Your display name</label>
+          <div class="participants-me-input">
+            <input id="my-display-name-input" type="text" placeholder="Your name" maxlength="40" />
+            <button id="btn-save-display-name" class="btn btn-sm btn-primary">Save</button>
+          </div>
+        </div>
+        <ul id="participants-list" class="participants-list"></ul>
       </div>
     </div>
   </div>

@@ -22,6 +22,11 @@ import {
   classifyGiphyStatus,
   addCommentToCard,
   removeCommentFromCard,
+  getOrCreateUserId,
+  classifyFacilitatorRole,
+  currentFacilitator,
+  getOrCreateDisplayName,
+  formatParticipants,
 } from './lib.js';
 
 /* ─────────────────────────────────────────────────────
@@ -34,9 +39,19 @@ const GIPHY_API_KEY = 'nCKHSmRVv64eVvtVPFT6DfFeo3IJ7WKV';
 /* ─────────────────────────────────────────────────────
    STATE
 ───────────────────────────────────────────────────── */
-let ydoc, provider, wsProvider, yCards, yMeta;
+let ydoc, provider, wsProvider, yCards, yMeta, yFacEvents;
 let currentRoom = null;
+// Stable, per-browser user identifier — survives page refreshes. This is
+// what we store in yMeta.facilitatorId so refreshing doesn't lose the role.
+const MY_USER_ID = getOrCreateUserId();
+let myDisplayName = getOrCreateDisplayName();
+// `isFacilitator` is now DERIVED from yMeta.facilitatorId === MY_USER_ID
+// and is refreshed by refreshFacilitatorUI() whenever yMeta changes.
 let isFacilitator = false;
+// When true, the user expressed intent to claim facilitator (e.g. clicked
+// "Create Room" or entered the passphrase) but we're still waiting for the
+// initial sync from the websocket to know if the seat is already taken.
+let pendingFacilitatorClaim = false;
 let currentCol = null;       // which column the add-modal targets
 let selectedGifUrl = null;   // gif chosen in picker
 let editingCardId = null;    // null = adding new, string = editing existing
@@ -72,26 +87,30 @@ btnTheme.addEventListener('click', () => {
 });
 
 /* ─────────────────────────────────────────────────────
-   GLOBAL BLUR/UNBLUR ALL (anyone can toggle, syncs to all peers)
+   GLOBAL BLUR/UNBLUR ALL (facilitator-only, syncs to all peers)
 ───────────────────────────────────────────────────── */
 const btnHideAllGlobal = $('btn-hide-all-global');
 btnHideAllGlobal.addEventListener('click', () => {
-  if (!yCards || !yMeta) { toast('Not connected yet'); return; }
-  // Flip the persistent "blurAll" flag and apply it to every existing card.
-  // Storing the mode in yMeta means newly-added cards also pick it up.
+  if (!isFacilitator) {
+    toast('🚫 Only the facilitator can blur cards');
+    return;
+  }
+  if (!yMeta) { toast('Not connected yet'); return; }
+  // Global blur is a SINGLE room-wide flag. Rendering checks it at draw
+  // time, so we never have to iterate yCards or re-write each entry — which
+  // means we can't accidentally race with concurrent card additions on
+  // other peers (the old "iterate-then-write" pattern could make a
+  // freshly-added card disappear from the other peer's view).
   const blur = !(yMeta.get('blurAll') === true);
-  ydoc.transact(() => {
-    yMeta.set('blurAll', blur);
-    yCards.forEach((card, id) => {
-      yCards.set(id, Object.assign({}, card, { hidden: blur }));
-    });
-  });
+  ydoc.transact(() => yMeta.set('blurAll', blur));
   toast(blur ? '🌫 All cards blurred for everyone' : '👁 All cards revealed for everyone');
 });
 
 // Keep the button label/active state in sync with the actual mode.
+// Also hide it entirely for non-facilitators — only the facilitator can blur.
 function refreshHideAllButton() {
   if (!yMeta) return;
+  btnHideAllGlobal.classList.toggle('hidden', !isFacilitator);
   const state = blurButtonState(yMeta.get('blurAll') === true);
   btnHideAllGlobal.classList.toggle('is-active', state.active);
   btnHideAllGlobal.textContent = state.label;
@@ -129,10 +148,9 @@ $('btn-join-room').addEventListener('click', () => {
 function autoJoinFromHash() {
   const hash = window.location.hash.slice(1);
   if (hash) {
-    // Restore facilitator status for this room if we were the facilitator
-    // before refreshing (stored per-room in localStorage).
-    const wasFacilitator = localStorage.getItem('facilitator:' + hash) === '1';
-    launchRoom(hash, wasFacilitator);
+    // No need to pass facilitator intent — the role is derived from
+    // yMeta.facilitatorId === MY_USER_ID and re-evaluated after sync.
+    launchRoom(hash, false);
   }
 }
 if (document.readyState === 'loading') {
@@ -141,9 +159,9 @@ if (document.readyState === 'loading') {
   autoJoinFromHash();
 }
 
-function launchRoom(roomId, isFac) {
+function launchRoom(roomId, claimFacilitator) {
   currentRoom = roomId;
-  isFacilitator = isFac;
+  pendingFacilitatorClaim = !!claimFacilitator;
 
   // Update URL
   window.location.hash = roomId;
@@ -155,12 +173,9 @@ function launchRoom(roomId, isFac) {
   $('lobby').classList.add('hidden');
   $('app').classList.remove('hidden');
 
-  // *** Init Yjs FIRST — activateFacilitator() calls renderAllColumns(), ***
-  // *** which iterates yCards, so yCards must exist before that runs.    ***
+  // Init Yjs — this also registers the yMeta observer that drives the
+  // facilitator UI, and arranges to attempt the pending claim after sync.
   initYjs(roomId);
-
-  // Facilitator UI
-  if (isFacilitator) activateFacilitator();
 }
 
 /* ─────────────────────────────────────────────────────
@@ -188,14 +203,27 @@ function initYjs(roomId) {
   // We use a Y.Map keyed by cardId for easy updates
   yCards = ydoc.getMap('cards');
   yMeta  = ydoc.getMap('meta');   // { blurAll: bool }
+  // Facilitator state is stored as a CRDT-safe event log so concurrent
+  // claims can NEVER steal the role from the current holder. See
+  // lib.js → currentFacilitator() for the replay rules.
+  yFacEvents = ydoc.getArray('facilitatorEvents');
 
   // *** Register observers BEFORE any potentially-throwing network setup, ***
   // *** so local card adding always re-renders even if WebRTC fails.       ***
   yCards.observe(() => renderAllColumns());
-  yMeta.observe(() => refreshHideAllButton());
+  yMeta.observe(() => {
+    // Blur state lives in yMeta — re-render so cards apply/remove the blur.
+    refreshHideAllButton();
+    renderAllColumns();
+  });
+  yFacEvents.observe(() => {
+    refreshFacilitatorUI();
+    renderParticipantsList();
+  });
 
   renderAllColumns();
   refreshHideAllButton();
+  refreshFacilitatorUI();
 
   // ── Transport #1: WebSocket (RELIABLE) ────────────────────────────────
   // demos.yjs.dev is the official public Yjs websocket broker. Acts as a
@@ -215,8 +243,20 @@ function initYjs(roomId) {
     wsProvider.on('status', e => {
       console.log('[RetroBoard] websocket status:', e.status);
     });
-    wsProvider.awareness.on('change', updatePeerCount);
-    wsProvider.awareness.setLocalState({ online: true });
+    // Once the room's state has synced from the server, try to honor any
+    // pending facilitator claim (e.g. user just clicked "Create Room").
+    wsProvider.on('sync', synced => {
+      if (synced) tryPendingFacilitatorClaim();
+    });
+    wsProvider.awareness.on('change', () => {
+      updatePeerCount();
+      renderParticipantsList();
+    });
+    wsProvider.awareness.setLocalState({
+      online: true,
+      userId: MY_USER_ID,
+      displayName: myDisplayName,
+    });
   } catch (err) {
     console.error('[RetroBoard] WebSocket init failed:', err);
     toast('⚠ Sync server unreachable: ' + err.message, 6000);
@@ -245,17 +285,105 @@ function updatePeerCount() {
   const aw = (wsProvider && wsProvider.awareness)
           || (provider && provider.awareness);
   if (!aw) { $('peer-count-num').textContent = '1'; return; }
-  $('peer-count-num').textContent = aw.getStates().size;
+  // Deduplicate by userId so multiple tabs from the same person don't
+  // inflate the count.
+  const ids = new Set();
+  aw.getStates().forEach(s => { if (s && s.userId) ids.add(s.userId); });
+  // Fallback: if no state has a userId yet (early sync), use raw state count.
+  $('peer-count-num').textContent = ids.size || aw.getStates().size || 1;
+}
+
+/* ─────────────────────────────────────────────────────
+   PARTICIPANTS MODAL
+───────────────────────────────────────────────────── */
+$('peer-count').addEventListener('click', () => {
+  // Pre-fill the "your display name" input
+  $('my-display-name-input').value = myDisplayName;
+  renderParticipantsList();
+  openModal('modal-participants');
+  setTimeout(() => $('my-display-name-input').focus(), 100);
+});
+
+$('btn-save-display-name').addEventListener('click', saveDisplayName);
+$('my-display-name-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') saveDisplayName();
+});
+
+function saveDisplayName() {
+  const newName = $('my-display-name-input').value.trim();
+  if (!newName) { toast('Please enter a name'); return; }
+  myDisplayName = newName;
+  localStorage.setItem('displayName', newName);
+  if (wsProvider && wsProvider.awareness) {
+    wsProvider.awareness.setLocalState({
+      online: true,
+      userId: MY_USER_ID,
+      displayName: myDisplayName,
+    });
+  }
+  renderParticipantsList();
+  toast('✅ Display name updated');
+}
+
+function renderParticipantsList() {
+  const listEl = $('participants-list');
+  if (!listEl) return;
+  const aw = (wsProvider && wsProvider.awareness)
+          || (provider && provider.awareness);
+  const states = aw ? aw.getStates() : null;
+  const facilitatorId = currentFacilitator(yFacEvents);
+  const participants = formatParticipants(states, MY_USER_ID, facilitatorId);
+
+  listEl.innerHTML = '';
+  participants.forEach(p => {
+    const li = document.createElement('li');
+
+    const avatar = document.createElement('span');
+    avatar.className = 'participant-avatar';
+    avatar.textContent = (p.displayName || '?').trim().charAt(0).toUpperCase();
+    li.appendChild(avatar);
+
+    const name = document.createElement('span');
+    name.className = 'participant-name';
+    name.textContent = p.displayName;
+    li.appendChild(name);
+
+    if (p.isFacilitator) {
+      const tag = document.createElement('span');
+      tag.className = 'participant-tag facilitator';
+      tag.textContent = '🎭 Facilitator';
+      li.appendChild(tag);
+    }
+    if (p.isMe) {
+      const tag = document.createElement('span');
+      tag.className = 'participant-tag me';
+      tag.textContent = 'You';
+      li.appendChild(tag);
+    }
+
+    listEl.appendChild(li);
+  });
 }
 
 /* ═══════════════════════════════════════════════════════
-   FACILITATOR
+   FACILITATOR — single role per room.
+   Stored as a Y.Array event log (claim/release events) so that the
+   current holder is derived deterministically from the merged log on
+   every peer. Concurrent claims while the seat is occupied are
+   silently no-ops at derivation time — they cannot steal the role.
 ═══════════════════════════════════════════════════════ */
 $('btn-facilitator').addEventListener('click', () => {
   if (isFacilitator) { toast('You are already the facilitator!'); return; }
+  // Always re-read the latest state at click time.
+  const holder = currentFacilitator(yFacEvents);
+  if (holder !== null) {
+    toast('🚫 This room already has a facilitator');
+    return;
+  }
   openModal('modal-facilitator');
   $('fac-passphrase-input').value = '';
   $('fac-error').classList.add('hidden');
+  $('fac-taken-msg').classList.add('hidden');
   setTimeout(() => $('fac-passphrase-input').focus(), 100);
 });
 
@@ -267,48 +395,129 @@ $('fac-passphrase-input').addEventListener('keydown', e => {
 function confirmFacilitator() {
   const pass = $('fac-passphrase-input').value;
   // The passphrase is the room ID itself — simple, no server needed
-  if (pass === currentRoom) {
-    closeModal('modal-facilitator');
-    isFacilitator = true;
-    activateFacilitator();
-    toast('🎭 You are now the facilitator!');
-  } else {
+  if (pass !== currentRoom) {
     $('fac-error').classList.remove('hidden');
+    return;
   }
+  const holder = currentFacilitator(yFacEvents);
+  if (holder !== null) {
+    $('fac-error').classList.add('hidden');
+    $('fac-taken-msg').classList.remove('hidden');
+    return;
+  }
+  closeModal('modal-facilitator');
+  pendingFacilitatorClaim = true;
+  tryPendingFacilitatorClaim();
 }
 
-function activateFacilitator() {
-  $('facilitator-bar').classList.remove('hidden');
-  document.body.classList.add('is-facilitator');
-  $('btn-facilitator').textContent = '🎭 Facilitator ✓';
-  $('btn-facilitator').classList.add('btn-success');
-  // Remember across page refreshes (per-room).
-  if (currentRoom) localStorage.setItem('facilitator:' + currentRoom, '1');
-  renderAllColumns();
+/**
+ * Append a 'claim' event to the shared log. Even if our local view of
+ * the log is stale (another claim is in flight), this is still safe:
+ * the derivation function (currentFacilitator) replays the merged log
+ * deterministically, and a 'claim' while the seat is occupied is a
+ * no-op for everyone. We then verify after a sync round-trip.
+ */
+function tryPendingFacilitatorClaim() {
+  if (!pendingFacilitatorClaim || !yFacEvents) return;
+
+  // Don't even attempt while the websocket is still catching up.
+  if (wsProvider && wsProvider.synced === false) {
+    const onSync = synced => {
+      if (synced) {
+        try { wsProvider.off('sync', onSync); } catch (_) {}
+        tryPendingFacilitatorClaim();
+      }
+    };
+    wsProvider.on('sync', onSync);
+    return;
+  }
+
+  pendingFacilitatorClaim = false;
+
+  // Pre-check from our local view (best-effort UX feedback only).
+  const localHolder = currentFacilitator(yFacEvents);
+  if (localHolder === MY_USER_ID) return;
+  if (localHolder !== null) {
+    toast('🚫 This room already has a facilitator');
+    return;
+  }
+
+  // Append the claim. If two peers do this concurrently, both events
+  // land in the Y.Array; the first one (by Yjs merge order) wins.
+  ydoc.transact(() => {
+    yFacEvents.push([{ type: 'claim', userId: MY_USER_ID }]);
+  });
+  toast('🎭 Claiming facilitator role…');
+
+  // Verify after a brief sync round-trip that our claim actually won.
+  setTimeout(() => {
+    if (!yFacEvents) return;
+    const winner = currentFacilitator(yFacEvents);
+    if (winner === MY_USER_ID) {
+      toast('🎭 You are now the facilitator!');
+    } else {
+      toast('🚫 Another participant claimed the role first');
+    }
+    refreshFacilitatorUI();
+  }, 1500);
 }
 
-// Facilitator controls
-$('btn-hide-all').addEventListener('click', () => {
+$('btn-release-fac').addEventListener('click', () => {
   if (!isFacilitator) return;
+  if (!confirm('Release the facilitator role? Another participant will be able to claim it.')) return;
   ydoc.transact(() => {
-    yCards.forEach((card, id) => {
-      const updated = Object.assign({}, card, { hidden: true });
-      yCards.set(id, updated);
-    });
+    yFacEvents.push([{ type: 'release', userId: MY_USER_ID }]);
   });
-  toast('👁 All cards hidden');
+  toast('🔓 Facilitator role released');
 });
 
-$('btn-reveal-all').addEventListener('click', () => {
-  if (!isFacilitator) return;
-  ydoc.transact(() => {
-    yCards.forEach((card, id) => {
-      const updated = Object.assign({}, card, { hidden: false });
-      yCards.set(id, updated);
-    });
-  });
-  toast('👁 All cards revealed');
-});
+/**
+ * Reflect the current facilitator (derived from yFacEvents) in the UI.
+ * Single source of truth — called by the yFacEvents observer.
+ */
+function refreshFacilitatorUI() {
+  const holder = currentFacilitator(yFacEvents);
+  const role = classifyFacilitatorRole(holder, MY_USER_ID);
+  const wasFacilitator = isFacilitator;
+  isFacilitator = (role === 'self');
+
+  // Header button
+  const btn = $('btn-facilitator');
+  if (isFacilitator) {
+    btn.textContent = '🎭 Facilitator ✓';
+    btn.classList.add('btn-success');
+    btn.classList.remove('is-taken');
+    btn.removeAttribute('disabled');
+    btn.title = 'You are the facilitator';
+  } else if (role === 'taken') {
+    btn.textContent = '🎭 Facilitator (taken)';
+    btn.classList.remove('btn-success');
+    btn.classList.add('is-taken');
+    btn.setAttribute('disabled', '');
+    btn.title = 'Another participant is currently the facilitator';
+  } else {
+    btn.textContent = '🎭 Facilitator';
+    btn.classList.remove('btn-success');
+    btn.classList.remove('is-taken');
+    btn.removeAttribute('disabled');
+    btn.title = 'Become facilitator';
+  }
+
+  // Facilitator bar + body class
+  if (isFacilitator) {
+    $('facilitator-bar').classList.remove('hidden');
+    document.body.classList.add('is-facilitator');
+  } else {
+    $('facilitator-bar').classList.add('hidden');
+    document.body.classList.remove('is-facilitator');
+  }
+
+  // Re-render cards in case facilitator-only affordances need to appear
+  if (wasFacilitator !== isFacilitator) renderAllColumns();
+
+  // Show/hide the global Blur All button — facilitator-only
+  refreshHideAllButton();
+}
 
 
 /* ═══════════════════════════════════════════════════════
@@ -403,16 +612,14 @@ function submitCard() {
     ydoc.transact(() => yCards.set(editingCardId, updated));
     toast('✏️ Card updated');
   } else {
-    // New card — inherit the room's current blur mode so it doesn't
-    // pop into view when everything else is currently blurred.
-    const blurAll = yMeta && yMeta.get('blurAll') === true;
+    // New card — blur is now a single room-wide yMeta flag applied at
+    // render time, so we don't need to set `hidden` on the card itself.
     const card = {
       id: uid(),
       col: currentCol,
       text: text,
       gif: selectedGifUrl || null,
       votes: 0,
-      hidden: blurAll,
       createdAt: Date.now(),
     };
     ydoc.transact(() => yCards.set(card.id, card));
@@ -536,7 +743,10 @@ function createCardEl(card) {
   const el = document.createElement('div');
   el.className = 'card';
   el.dataset.id = card.id;
-  if (card.hidden) el.classList.add('hidden-card');
+  // Blur is a room-wide flag (yMeta.blurAll), not a per-card field.
+  // Falling back to legacy card.hidden so cards from older versions still render correctly.
+  const isBlurred = (yMeta && yMeta.get('blurAll') === true) || card.hidden === true;
+  if (isBlurred) el.classList.add('hidden-card');
 
   // Text
   const textEl = document.createElement('p');

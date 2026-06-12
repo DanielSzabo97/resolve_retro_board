@@ -198,7 +198,13 @@ body {
   display: flex; align-items: center; gap: 8px;
   font-size: 13px; color: var(--text-muted);
   background: var(--surface2); border-radius: 20px; padding: 5px 14px;
+  border: 1px solid transparent;
+  font-family: var(--font);
+  cursor: pointer;
+  transition: all var(--transition);
 }
+.peer-count:hover { border-color: #6c63ff; color: #6c63ff; }
+.peer-count:active { transform: scale(0.97); }
 .peer-dot {
   width: 8px; height: 8px; border-radius: 50%; background: #28a745;
   animation: pulse-dot 2s ease-in-out infinite;
@@ -606,4 +612,93 @@ textarea:focus, input:focus { border-color: #6c63ff; }
   background: var(--col-sad);
   color: #fff;
   border-color: var(--col-sad);
+}
+
+/* ══════════════════════════════════════════════════════
+   FACILITATOR BUTTON — disabled "taken" state
+══════════════════════════════════════════════════════ */
+#btn-facilitator.is-taken,
+#btn-facilitator[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* ══════════════════════════════════════════════════════
+   PARTICIPANTS MODAL
+══════════════════════════════════════════════════════ */
+.participants-me-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+.participants-me-row label {
+  font-size: 12px;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.participants-me-input {
+  display: flex;
+  gap: 6px;
+}
+.participants-me-input input { flex: 1; }
+
+.participants-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--input-bg);
+  max-height: 360px;
+  overflow-y: auto;
+}
+.participants-list li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+}
+.participants-list li:last-child { border-bottom: none; }
+
+.participant-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #6c63ff;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+.participant-name { flex: 1; color: var(--text); }
+.participant-tag {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  padding: 2px 7px;
+  border-radius: 10px;
+}
+.participant-tag.me {
+  background: #6c63ff;
+  color: #fff;
+}
+.participant-tag.facilitator {
+  background: #fff3cd;
+  color: #856404;
+  border: 1px solid #ffc107;
+}
+body.dark .participant-tag.facilitator {
+  background: #2d2a1e;
+  color: #ffc107;
+  border-color: #f9a825;
 }

@@ -167,3 +167,161 @@ export function removeCommentFromCard(card, commentId) {
   });
 }
 
+/**
+ * Read or generate a stable per-browser user ID, persisted in localStorage.
+ * Used as the value stored in yMeta.facilitatorId so that facilitator status
+ * survives page refreshes (clientID resets every reload).
+ * @param {Storage} [storage=localStorage]
+ * @param {() => string} [makeId=uid] - injectable id generator for tests
+ */
+export function getOrCreateUserId(storage = (typeof localStorage !== 'undefined' ? localStorage : null), makeId = uid) {
+  if (!storage) return makeId();
+  let id = storage.getItem('userId');
+  if (!id) {
+    id = makeId();
+    storage.setItem('userId', id);
+  }
+  return id;
+}
+
+/**
+ * Decide what role the current user holds relative to a stored
+ * facilitatorId value.  Returns one of:
+ *   'self'    — this user is the facilitator
+ *   'taken'   — someone else holds the role
+ *   'vacant'  — no one holds the role (anyone may claim)
+ */
+export function classifyFacilitatorRole(facilitatorId, myUserId) {
+  if (!facilitatorId)           return 'vacant';
+  if (facilitatorId === myUserId) return 'self';
+  return 'taken';
+}
+
+/**
+ * Derive the current facilitator's userId from an ordered event log.
+ *
+ *   events = [
+ *     { type: 'claim',   userId: 'A' },
+ *     { type: 'release', userId: 'A' },
+ *     { type: 'claim',   userId: 'B' },
+ *   ]
+ *
+ * The log is replayed strictly:
+ *   - A 'claim' is honored ONLY when the seat is currently vacant.
+ *   - A 'release' is honored ONLY when it comes from the current holder.
+ *   - Any other event is silently ignored.
+ *
+ * Because all peers see the same Yjs-merged ordering of the array,
+ * they all derive the same answer — so concurrent claims while the
+ * seat is occupied can NEVER steal the role, regardless of clock skew.
+ *
+ * Returns the holder's userId, or `null` if the seat is currently vacant.
+ */
+export function currentFacilitator(events) {
+  if (!events) return null;
+  // Accept arrays or Y.Array-like (has toArray).
+  const arr = typeof events.toArray === 'function' ? events.toArray() : Array.from(events);
+  let holder = null;
+  for (const ev of arr) {
+    if (!ev || typeof ev !== 'object') continue;
+    if (ev.type === 'claim') {
+      if (holder === null && typeof ev.userId === 'string' && ev.userId) {
+        holder = ev.userId;
+      }
+    } else if (ev.type === 'release') {
+      if (holder !== null && ev.userId === holder) {
+        holder = null;
+      }
+    }
+  }
+  return holder;
+}
+
+/**
+ * Pick a friendly default display name when the user hasn't set one.
+ * Uses an injectable RNG for tests.
+ */
+export function defaultDisplayName(rand = Math.random) {
+  return 'Guest ' + Math.floor(1000 + rand() * 9000);
+}
+
+/**
+ * Read or generate a stable display name from localStorage.
+ */
+export function getOrCreateDisplayName(storage = (typeof localStorage !== 'undefined' ? localStorage : null), rand = Math.random) {
+  if (!storage) return defaultDisplayName(rand);
+  let n = storage.getItem('displayName');
+  if (!n) {
+    n = defaultDisplayName(rand);
+    storage.setItem('displayName', n);
+  }
+  return n;
+}
+
+/**
+ * Build a deduplicated, sorted participants list from Yjs awareness states.
+ *
+ * @param {Iterable<[number, any]> | object | Map} states - what
+ *        wsProvider.awareness.getStates() returns (a Map<clientId, state>),
+ *        or an array of [clientId, state] tuples (easier for tests).
+ * @param {string} myUserId - my own stable user ID
+ * @param {string|null} facilitatorUserId - whoever currently holds the role
+ *
+ * Returns an array of { userId, displayName, isMe, isFacilitator } sorted
+ * by displayName, with the current user pinned to the top.
+ *
+ * If multiple awareness states share the same userId (e.g. the same user
+ * has the room open in two tabs), they're collapsed to a single entry.
+ */
+export function formatParticipants(states, myUserId, facilitatorUserId) {
+  // Normalise input to an array of state objects.
+  let stateValues = [];
+  if (!states) return [];
+  if (Array.isArray(states)) {
+    // Either an array of [clientId, state] tuples OR an array of state objects.
+    for (const entry of states) {
+      if (Array.isArray(entry) && entry.length === 2) stateValues.push(entry[1]);
+      else if (entry && typeof entry === 'object') stateValues.push(entry);
+    }
+  } else if (states instanceof Map || typeof states.forEach === 'function') {
+    states.forEach(v => stateValues.push(v));
+  } else if (typeof states === 'object') {
+    stateValues = Object.values(states);
+  }
+
+  // Dedupe by userId. If a user has multiple tabs, the first state wins
+  // (any state with the same userId is presumed to be the same person).
+  const byUserId = new Map();
+  for (const s of stateValues) {
+    if (!s || typeof s !== 'object') continue;
+    if (!s.userId) continue;
+    if (byUserId.has(s.userId)) continue;
+    byUserId.set(s.userId, {
+      userId: s.userId,
+      displayName: (typeof s.displayName === 'string' && s.displayName.trim())
+        ? s.displayName.trim()
+        : 'Guest',
+      isMe: s.userId === myUserId,
+      isFacilitator: !!facilitatorUserId && s.userId === facilitatorUserId,
+    });
+  }
+
+  // If "me" hasn't broadcast yet, still include a placeholder so the user
+  // never sees an empty list of their own session.
+  if (myUserId && !byUserId.has(myUserId)) {
+    byUserId.set(myUserId, {
+      userId: myUserId,
+      displayName: 'You',
+      isMe: true,
+      isFacilitator: !!facilitatorUserId && facilitatorUserId === myUserId,
+    });
+  }
+
+  const list = Array.from(byUserId.values());
+  list.sort((a, b) => {
+    if (a.isMe && !b.isMe) return -1;
+    if (!a.isMe && b.isMe) return 1;
+    return a.displayName.localeCompare(b.displayName);
+  });
+  return list;
+}

@@ -20,6 +20,12 @@ import {
   classifyGiphyStatus,
   addCommentToCard,
   removeCommentFromCard,
+  getOrCreateUserId,
+  classifyFacilitatorRole,
+  currentFacilitator,
+  defaultDisplayName,
+  getOrCreateDisplayName,
+  formatParticipants,
 } from './lib.js';
 
 /* ─────────────────────────────────────────────────────
@@ -356,3 +362,271 @@ describe('buildExportMarkdown', () => {
   });
 });
 
+/* ─────────────────────────────────────────────────────
+   getOrCreateUserId
+───────────────────────────────────────────────────── */
+describe('getOrCreateUserId', () => {
+  function fakeStorage() {
+    const m = new Map();
+    return {
+      getItem: k => (m.has(k) ? m.get(k) : null),
+      setItem: (k, v) => m.set(k, String(v)),
+      _map: m,
+    };
+  }
+
+  it('creates and persists a new id on first call', () => {
+    const s = fakeStorage();
+    const id = getOrCreateUserId(s, () => 'fresh-id');
+    expect(id).toBe('fresh-id');
+    expect(s.getItem('userId')).toBe('fresh-id');
+  });
+
+  it('returns the existing id on subsequent calls', () => {
+    const s = fakeStorage();
+    s.setItem('userId', 'persisted-123');
+    const id = getOrCreateUserId(s, () => 'should-not-be-used');
+    expect(id).toBe('persisted-123');
+  });
+
+  it('falls back to a generated id when storage is missing', () => {
+    const id = getOrCreateUserId(null, () => 'no-storage');
+    expect(id).toBe('no-storage');
+  });
+
+  it('is stable across calls when backed by storage', () => {
+    const s = fakeStorage();
+    const a = getOrCreateUserId(s);
+    const b = getOrCreateUserId(s);
+    expect(a).toBe(b);
+  });
+});
+
+/* ─────────────────────────────────────────────────────
+   classifyFacilitatorRole
+───────────────────────────────────────────────────── */
+describe('classifyFacilitatorRole', () => {
+  it('returns "vacant" when facilitatorId is empty / null / undefined', () => {
+    expect(classifyFacilitatorRole('',         'me')).toBe('vacant');
+    expect(classifyFacilitatorRole(null,       'me')).toBe('vacant');
+    expect(classifyFacilitatorRole(undefined,  'me')).toBe('vacant');
+  });
+
+  it('returns "self" when facilitatorId matches my id', () => {
+    expect(classifyFacilitatorRole('me', 'me')).toBe('self');
+  });
+
+  it('returns "taken" when facilitatorId belongs to someone else', () => {
+    expect(classifyFacilitatorRole('alice', 'bob')).toBe('taken');
+  });
+});
+
+/* ─────────────────────────────────────────────────────
+   currentFacilitator (the anti-steal derivation)
+───────────────────────────────────────────────────── */
+describe('currentFacilitator', () => {
+  it('returns null for empty / missing / non-array input', () => {
+    expect(currentFacilitator(undefined)).toBeNull();
+    expect(currentFacilitator(null)).toBeNull();
+    expect(currentFacilitator([])).toBeNull();
+  });
+
+  it('honors a single claim from a vacant state', () => {
+    expect(currentFacilitator([
+      { type: 'claim', userId: 'A' },
+    ])).toBe('A');
+  });
+
+  it('honors release only from the current holder', () => {
+    expect(currentFacilitator([
+      { type: 'claim',   userId: 'A' },
+      { type: 'release', userId: 'A' },
+    ])).toBeNull();
+  });
+
+  it('IGNORES a claim while the seat is occupied (anti-steal)', () => {
+    // Even though "claim B" appears AFTER "claim A", B does NOT take over —
+    // because the seat was not vacant when B's claim was processed.
+    expect(currentFacilitator([
+      { type: 'claim', userId: 'A' },
+      { type: 'claim', userId: 'B' },
+    ])).toBe('A');
+  });
+
+  it('IGNORES a release by someone who is not the holder', () => {
+    expect(currentFacilitator([
+      { type: 'claim',   userId: 'A' },
+      { type: 'release', userId: 'B' }, // not the holder, ignored
+    ])).toBe('A');
+  });
+
+  it('handles a full claim → release → claim cycle', () => {
+    expect(currentFacilitator([
+      { type: 'claim',   userId: 'A' },
+      { type: 'release', userId: 'A' },
+      { type: 'claim',   userId: 'B' },
+    ])).toBe('B');
+  });
+
+  it('still rejects a steal AFTER a proper handoff', () => {
+    // The user-reported scenario: A → release A → B claims → A tries to re-claim.
+    // A's late claim is processed when seat is occupied (by B) → no-op.
+    expect(currentFacilitator([
+      { type: 'claim',   userId: 'A' },
+      { type: 'release', userId: 'A' },
+      { type: 'claim',   userId: 'B' },
+      { type: 'claim',   userId: 'A' }, // A's stale-view steal attempt
+    ])).toBe('B');
+  });
+
+  it('concurrent claims: whichever Yjs orders first wins; the other is a no-op', () => {
+    // Both peers thought the seat was vacant. Yjs merges them in SOME order.
+    // Whichever ends up first wins; the other is dropped.
+    expect(currentFacilitator([
+      { type: 'claim', userId: 'A' },
+      { type: 'claim', userId: 'B' },
+    ])).toBe('A');
+
+    expect(currentFacilitator([
+      { type: 'claim', userId: 'B' },
+      { type: 'claim', userId: 'A' },
+    ])).toBe('B');
+  });
+
+  it('multiple release/claim cycles converge correctly', () => {
+    expect(currentFacilitator([
+      { type: 'claim',   userId: 'A' },
+      { type: 'release', userId: 'A' },
+      { type: 'claim',   userId: 'B' },
+      { type: 'release', userId: 'B' },
+      { type: 'claim',   userId: 'C' },
+    ])).toBe('C');
+  });
+
+  it('ignores malformed events without crashing', () => {
+    expect(currentFacilitator([
+      null,
+      undefined,
+      'not an object',
+      { type: 'claim' },                     // missing userId
+      { type: 'claim', userId: '' },         // empty userId
+      { type: 'unknown', userId: 'X' },      // bad type
+      { type: 'claim', userId: 'A' },        // valid
+    ])).toBe('A');
+  });
+
+  it('accepts Y.Array-like objects (anything with toArray)', () => {
+    const fakeYArray = {
+      toArray() { return [{ type: 'claim', userId: 'Z' }]; },
+    };
+    expect(currentFacilitator(fakeYArray)).toBe('Z');
+  });
+});
+
+/* ─────────────────────────────────────────────────────
+   defaultDisplayName / getOrCreateDisplayName
+───────────────────────────────────────────────────── */
+describe('display name helpers', () => {
+  function fakeStorage() {
+    const m = new Map();
+    return {
+      getItem: k => (m.has(k) ? m.get(k) : null),
+      setItem: (k, v) => m.set(k, String(v)),
+    };
+  }
+
+  it('defaultDisplayName produces "Guest NNNN"', () => {
+    expect(defaultDisplayName(() => 0)).toBe('Guest 1000');
+    expect(defaultDisplayName(() => 0.9999)).toMatch(/^Guest \d{4}$/);
+  });
+
+  it('getOrCreateDisplayName creates and persists', () => {
+    const s = fakeStorage();
+    const a = getOrCreateDisplayName(s, () => 0);
+    expect(a).toBe('Guest 1000');
+    expect(s.getItem('displayName')).toBe('Guest 1000');
+  });
+
+  it('getOrCreateDisplayName returns existing value', () => {
+    const s = fakeStorage();
+    s.setItem('displayName', 'Alice');
+    expect(getOrCreateDisplayName(s, () => 0)).toBe('Alice');
+  });
+
+  it('getOrCreateDisplayName falls back without storage', () => {
+    expect(getOrCreateDisplayName(null, () => 0.5)).toMatch(/^Guest \d{4}$/);
+  });
+});
+
+/* ─────────────────────────────────────────────────────
+   formatParticipants
+───────────────────────────────────────────────────── */
+describe('formatParticipants', () => {
+  it('returns [] for null/undefined input', () => {
+    expect(formatParticipants(null, 'me', null)).toEqual([]);
+    expect(formatParticipants(undefined, 'me', null)).toEqual([]);
+  });
+
+  it('always includes me even when awareness has no state yet', () => {
+    const list = formatParticipants(new Map(), 'me', null);
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ userId: 'me', isMe: true, isFacilitator: false });
+  });
+
+  it('deduplicates multiple tabs of the same user', () => {
+    const states = new Map([
+      [1, { userId: 'A', displayName: 'Alice' }],
+      [2, { userId: 'A', displayName: 'Alice (other tab)' }],
+      [3, { userId: 'B', displayName: 'Bob' }],
+    ]);
+    const list = formatParticipants(states, 'A', null);
+    expect(list.map(p => p.userId)).toEqual(['A', 'Bob' === 'Bob' ? 'B' : 'B']); // me first
+    expect(list).toHaveLength(2);
+  });
+
+  it('pins me to the top, others sorted by display name', () => {
+    const states = [
+      [1, { userId: 'X', displayName: 'Zelda' }],
+      [2, { userId: 'Y', displayName: 'Anne'  }],
+      [3, { userId: 'me', displayName: 'I am me' }],
+    ];
+    const list = formatParticipants(states, 'me', null);
+    expect(list.map(p => p.displayName)).toEqual(['I am me', 'Anne', 'Zelda']);
+  });
+
+  it('marks the facilitator', () => {
+    const states = [
+      [1, { userId: 'me',  displayName: 'Me' }],
+      [2, { userId: 'fac', displayName: 'Boss' }],
+    ];
+    const list = formatParticipants(states, 'me', 'fac');
+    const boss = list.find(p => p.userId === 'fac');
+    expect(boss.isFacilitator).toBe(true);
+    expect(list.find(p => p.userId === 'me').isFacilitator).toBe(false);
+  });
+
+  it('falls back to "Guest" when displayName is empty', () => {
+    const states = [[1, { userId: 'X', displayName: '   ' }]];
+    expect(formatParticipants(states, 'me', null)
+      .find(p => p.userId === 'X').displayName).toBe('Guest');
+  });
+
+  it('skips awareness states with no userId', () => {
+    const states = [
+      [1, { online: true }],         // no userId
+      [2, { userId: 'A', displayName: 'Alice' }],
+    ];
+    const list = formatParticipants(states, 'me', null);
+    expect(list.map(p => p.userId).sort()).toEqual(['A', 'me']);
+  });
+
+  it('accepts Map, array-of-tuples, and plain object input', () => {
+    const expected = [{ userId: 'A', displayName: 'Alice' }];
+    const fromMap   = formatParticipants(new Map([[1, expected[0]]]), 'A', null);
+    const fromArray = formatParticipants([[1, expected[0]]],          'A', null);
+    const fromObj   = formatParticipants({ '1': expected[0] },         'A', null);
+    expect(fromMap[0].displayName).toBe('Alice');
+    expect(fromArray[0].displayName).toBe('Alice');
+    expect(fromObj[0].displayName).toBe('Alice');
+  });
+});
